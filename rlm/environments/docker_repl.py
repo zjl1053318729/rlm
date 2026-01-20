@@ -197,7 +197,11 @@ class DockerREPL(NonIsolatedEnv):
         self.proxy_server: HTTPServer | None = None
         self.proxy_thread: threading.Thread | None = None
         self.proxy_port: int = 0
-        self.temp_dir = tempfile.mkdtemp(prefix="docker_repl_")
+        base_dir = os.environ.get(
+            "RLM_DOCKER_WORKSPACE_DIR", os.path.join(os.getcwd(), ".rlm_workspace")
+        )
+        os.makedirs(base_dir, exist_ok=True)
+        self.temp_dir = tempfile.mkdtemp(prefix="docker_repl_", dir=base_dir)
         self.pending_calls: list[RLMChatCompletion] = []
         self._calls_lock = threading.Lock()
 
