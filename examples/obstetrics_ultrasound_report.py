@@ -7,19 +7,14 @@ from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 
-# Try importing required ML libraries
-try:
-    import cv2
-    import torch
-    import numpy as np
-    from PIL import Image
-    from ultralytics import YOLO
-    import timm
-    from torchvision import transforms
-    from openai import OpenAI
-except ImportError:
-    print("Missing dependencies. Please install: torch torchvision timm ultralytics opencv-python pillow openai numpy")
-    # We continue to allow the script to be read/parsed, but execution will fail if called.
+import cv2
+import torch
+import numpy as np
+from PIL import Image
+from ultralytics import YOLO
+import timm
+from torchvision import transforms
+from openai import OpenAI
 
 from rlm import RLM
 from rlm.logger import RLMLogger
@@ -32,7 +27,7 @@ class UltrasoundAnalyzer:
         yolo_weights: str = "yolo11n.pt", # Placeholder path
         convnext_weights: str = "convnextv2_tiny.fcmae", # Placeholder model name/path
         openrouter_api_key: Optional[str] = None,
-        openrouter_model: str = "google/gemini-2.0-flash-exp:free", # Example model
+        openrouter_model: str = "google/gemini-3-flash-preview", # Example model
     ):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
@@ -45,9 +40,10 @@ class UltrasoundAnalyzer:
         print(f"Loading ConvNeXt model ({convnext_weights})...")
         # Assuming a custom trained model for planes, but here loading a pretrained one for demo
         self.classifier = timm.create_model(
-            convnext_weights, 
-            pretrained=True, 
-            num_classes=0 # Change this if loading a finetuned model with specific classes
+            "convnext_tiny.dinov3_lvd1689m",
+            pretrained=False, 
+            num_classes=6,
+            checkpoint_path=convnext_weights
         )
         self.classifier.to(self.device)
         self.classifier.eval()
@@ -59,13 +55,14 @@ class UltrasoundAnalyzer:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
         
-        # Mapping index to anatomical plane name (Example)
-        # In a real app, this matches the trained classifier's classes
+        # Mapping index to anatomical plane name
         self.plane_labels = {
-            0: "Abdominal Circumference",
-            1: "Biparietal Diameter",
-            2: "Femur Length",
-            3: "Unknown"
+            0: "Abdominal Circumference View",
+            1: "Amniotic Fluid",
+            2: "Cardiac View",
+            3: "Femur View",
+            4: "Renal View",
+            5: "Thalamic View"
         }
 
         # 3. Initialize OpenAI client for OpenRouter
@@ -109,12 +106,14 @@ class UltrasoundAnalyzer:
         
         with torch.no_grad():
             output = self.classifier(input_tensor)
-            # Assuming output is raw logits for classification
-            # If num_classes=0 (feature extraction), this logic needs adjustment. 
-            # Here we assume a classifier.
             if output.shape[1] > 1:
-                pred_idx = torch.argmax(output, dim=1).item()
-                return self.plane_labels.get(pred_idx, "Unknown")
+                probs = torch.softmax(output, dim=1)
+                max_prob, pred_idx = torch.max(probs, dim=1)
+                max_prob_val = max_prob.item()
+                pred_idx_val = pred_idx.item()
+                if max_prob_val < 0.6:
+                    return "Unknown"
+                return self.plane_labels.get(pred_idx_val, "Unknown")
             else:
                 return "FeatureVector (Classifier not fine-tuned)"
 
@@ -194,15 +193,16 @@ class UltrasoundAnalyzer:
 def main():
     parser = argparse.ArgumentParser(description="Generate Obstetrics Ultrasound Report")
     parser.add_argument("--input_dir", type=str, required=True, help="Path to folder containing ultrasound images")
-    parser.add_argument("--yolo", type=str, default="yolo11n.pt", help="Path to YOLO weights")
-    parser.add_argument("--convnext", type=str, default="convnextv2_tiny.fcmae", help="ConvNeXt model name or path")
+    parser.add_argument("--yolo", type=str, default="/home/null/best.pt", help="Path to YOLO weights")
+    parser.add_argument("--convnext", type=str, default="/home/null/timmconvnext_tiny_dinov3_lvd1689m/model.safetensors", help="ConvNeXt model name or path")
     
     args = parser.parse_args()
     
     # 1. run analysis pipeline
     analyzer = UltrasoundAnalyzer(
         yolo_weights=args.yolo,
-        convnext_weights=args.convnext
+        convnext_weights=args.convnext,
+        openrouter_api_key="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",
     )
     
     analysis_results = analyzer.process_folder(args.input_dir)
@@ -221,23 +221,27 @@ def main():
     # Initialize RLM (using OpenAI as per quickstart, assumes OPENAI_API_KEY is set for this part)
     # The user asked to use RLM for the final generation.
     rlm = RLM(
-        backend="openai",
+        backend="openrouter",
         backend_kwargs={
-            "model_name": "gpt-4o",
+            "model_name": "x-ai/grok-4.1-fast",
             "api_key": os.getenv("OPENAI_API_KEY"),
         },
         environment="local",
         environment_kwargs={},
-        max_depth=1,
+        max_depth=3,
         logger=logger,
         verbose=True
     )
+    
+    examples = str(json.load(open("/home/null/rlm/examples/example.json")))
     
     prompt = (
         f"You are an expert obstetrician assistant. "
         f"Based on the following structured data extracted from ultrasound images, "
         f"generate a comprehensive and professional obstetrics ultrasound report. "
-        f"Highlight any missing standard planes if applicable. "
+        # f"Highlight any missing standard planes if applicable. "
+        f"The final report should consist of Finding and Impression in Chinese. "
+        f"Here are some examples of the report: {examples}"
         f"\n\nData:\n{context_str}"
     )
     
@@ -247,7 +251,7 @@ def main():
     print("\n" + "="*50)
     print("GENERATED REPORT")
     print("="*50)
-    print(report)
+    print(report.response)
     print("="*50)
 
 if __name__ == "__main__":
